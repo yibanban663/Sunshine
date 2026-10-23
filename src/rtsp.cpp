@@ -971,9 +971,18 @@ namespace rtsp_stream {
     auto end = std::find(begin, std::end(target), '/');
     std::string_view type {begin, (size_t) std::distance(begin, end)};
 
+    // x-ss-voice: streamid=audio/1/0 → voice track port; streamid=audio/0/0 → game audio
+    std::string_view track;
+    if (end != std::end(target)) {
+      auto tbegin = end + 1;
+      auto tend = std::find(tbegin, std::end(target), '/');
+      track = std::string_view {tbegin, (size_t) std::distance(tbegin, tend)};
+    }
+    bool voice_track = (type == "audio"sv && track == "1"sv);
+
     std::uint16_t port;
     if (type == "audio"sv) {
-      port = net::map_port(stream::AUDIO_STREAM_PORT);
+      port = net::map_port(voice_track ? stream::VOICE_STREAM_PORT : stream::AUDIO_STREAM_PORT);
     } else if (type == "video"sv) {
       port = net::map_port(stream::VIDEO_STREAM_PORT);
     } else if (type == "control"sv) {
