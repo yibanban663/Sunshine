@@ -238,6 +238,7 @@ namespace config {
   struct audio_t {
     std::string sink;  ///< Audio output device/sink to use for audio capture
     std::string virtual_sink;  ///< Virtual audio sink for audio routing
+    std::string voice_source;  ///< x-ss-voice: host microphone device name (empty = disabled)
     bool stream;  ///< Enable audio streaming to clients
     bool install_steam_drivers;  ///< Install Steam audio drivers for enhanced compatibility
     bool external_audio;  ///< Windows capture-only mode; an external router owns endpoint defaults and formats.
