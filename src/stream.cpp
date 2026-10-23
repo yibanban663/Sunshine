@@ -33,6 +33,7 @@ extern "C" {
 #include "platform/common.h"
 #include "process.h"
 #include "stream.h"
+#include "voice.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -493,6 +494,8 @@ namespace stream {
 
     udp::socket video_sock {io_context};  ///< UDP socket bound for video packet transmission.
     udp::socket audio_sock {io_context};  ///< UDP socket bound for audio packet transmission.
+    udp::socket voice_sock {io_context};  ///< x-ss-voice: UDP socket for host voice track.
+    std::jthread voice_thread;  ///< x-ss-voice: voice capture/broadcast thread.
 
     control_server_t control_server;  ///< ENet server for GameStream control packets.
   };
@@ -546,6 +549,14 @@ namespace stream {
       audio_fec_packet_t fec_packet;  ///< Reusable packet header for audio forward-error-correction shards.
       std::unique_ptr<platf::deinit_t> qos;  ///< Lifetime guard for audio-socket QoS configuration.
     } audio;  ///< Audio capture configuration for the stream..
+
+    struct {
+      crypto::cipher::cbc_t cipher;  ///< AES-CBC cipher for voice-packet encryption (same key material as audio).
+      std::uint16_t sequenceNumber;  ///< Next RTP sequence number for a voice packet.
+      std::uint32_t avRiKeyId;  ///< Same encryption key ID as audio (shared session key).
+      std::uint32_t timestamp;  ///< RTP timestamp for the next voice packet.
+      udp::endpoint peer;  ///< Client UDP endpoint for the voice channel (learned from first ping).
+    } voice;  ///< x-ss-voice: host voice track state.
 
     struct {
       crypto::cipher::gcm_t cipher;  ///< AES-GCM cipher for the encrypted control channel.
@@ -2024,11 +2035,28 @@ namespace stream {
       return -1;
     }
 
+    // x-ss-voice: bind voice track socket only when voice_source is configured
+    if (!config::audio.voice_source.empty()) {
+      auto voice_port = net::map_port(VOICE_STREAM_PORT);
+      ctx.voice_sock.open(protocol, ec);
+      if (!ec) {
+        ctx.voice_sock.bind(udp::endpoint(bind_addr, voice_port), ec);
+        if (ec) {
+          BOOST_LOG(warning) << "Couldn't bind Voice port ["sv << voice_port << "]: "sv << ec.message() << "; voice track disabled"sv;
+        }
+      }
+    }
+
     ctx.message_queue_queue = std::make_shared<message_queue_queue_t::element_type>(30);
 
     ctx.video_thread = std::jthread {videoBroadcastThread, std::ref(ctx.video_sock)};
     ctx.audio_thread = std::jthread {audioBroadcastThread, std::ref(ctx.audio_sock)};
     ctx.control_thread = std::jthread {controlBroadcastThread, &ctx.control_server};
+
+    // x-ss-voice: launch voice thread only if configured and socket bound
+    if (!config::audio.voice_source.empty() && ctx.voice_sock.is_open()) {
+      ctx.voice_thread = std::jthread { voice::voiceThread, /* session filled later */ nullptr, std::ref(ctx.voice_sock) };
+    }
 
     ctx.recv_thread = std::jthread {recvThread, std::ref(ctx)};
 
@@ -2385,6 +2413,12 @@ namespace stream {
       session->audio.avRiKeyId = util::endian::big(*(std::uint32_t *) launch_session.iv.data());
       session->audio.sequenceNumber = 0;
       session->audio.timestamp = 0;
+
+      // x-ss-voice: initialize voice track state (same session key material as audio)
+      session->voice.cipher = session->audio.cipher;
+      session->voice.avRiKeyId = session->audio.avRiKeyId;
+      session->voice.sequenceNumber = 0;
+      session->voice.timestamp = 0;
 
       session->control.peer = nullptr;
       session->state.store(state_e::STOPPED, std::memory_order_relaxed);
